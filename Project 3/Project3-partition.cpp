@@ -11,8 +11,7 @@
 #define LENGTH 1048526	
 //Input size of array to be summed (2^17 = 131072)
 
-double fast_sum(double *pd_input, int i_N); //A 2D array input is NEEDED. A 1D array approach similar to the binary summation example in the slides will not work. Prove me wrong.
-
+double fast_sum(double *pd_input, int i_N); 
 
 void get_walltime(double* wcTime) {
 
@@ -43,7 +42,7 @@ int main(int argc, char *argv[]) {
 	printf("Elapsed time: %f\n", d_E - d_S);
 }
 
-// Code was heavily inspired by "summation in openmp" example in slides
+
 double fast_sum(double *pd_input, int i_N) {
 
 	int i_numThreads;
