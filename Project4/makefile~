@@ -1,0 +1,6 @@
+all:
+	g++ -g -o Project4-Serial_Quicksort Project4-Serial_Quicksort.cpp -lm -O3
+	g++ -g -o Project4-Parallel_Quicksort Project4-Parallel_Quicksort.cpp -lm -fopenmp -O3
+	g++ -g -o Project4-Serial_Listranking Project4-Serial_Listranking.cpp -lm -O3
+	g++ -g -o Project4-Parallel_Listranking Project4-Parallel_Listranking.cpp -lm -fopenmp -O3
+
