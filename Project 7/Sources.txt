@@ -1,0 +1,7 @@
+Serial Matrix Multiply: http://sandbox.mc.edu/~bennet/parallel/code/smmult_c.html 
+
+OpenMP Matrix Multiply: https://computing.llnl.gov/tutorials/openMP/samples/C/omp_mm.c
+
+MPI Cannon Matrix Multiply: https://github.com/cstroe/PP-MM-A03/tree/master/code
+
+MPI Summa Matrix Multiply: http://kayaogz.github.io/teaching/ (Look for tp4-code.tgz and solution)

@@ -1,0 +1,648 @@
+\documentclass{article}
+
+\usepackage{graphicx}
+\usepackage{multimedia}
+\usepackage{amssymb}
+
+%\usepackage{algorithmic}
+\usepackage{fancybox}
+\usepackage{pseudocode}
+
+\usepackage{pifont}
+\usepackage{multirow}
+\usepackage{slashbox}
+\usepackage{pdfpages}
+\usepackage{picture}
+
+\usepackage{appendix}
+
+\title{CS566 Parallel Processing \\ Assignment 03}
+\author{Camillo Lugaresi and Cosmin Stroe \vspace{20pt} \\ Department of Computer Science \\
+University of Illinois at Chicago}
+
+\date{November 8, 2011}
+
+\begin{document}
+
+\maketitle
+\newpage
+
+\section{Algorithm Details and Formulations}
+
+For this assignment we tackled two main chanllenges.  The first was
+experimenting with several implementations of matrix multiplication algorithms. 
+In order to do matrix multiplication we implemented Cannon's algorithm and the
+Dekel, Nassimi, Sahni (DNS) algorithm.  The second was the optimization of our
+LU-decomposition algorithm by eliminating broadcast communication and using
+pipelined communication instead.  The reason optimization of the
+LU-decomposition algorithm became necessary was that we noticed that it was
+taking significantly longer than the matrix multiplication algorithms.  As part
+of our optimization we implemented a 1D row partitioning LU-decomposition
+algorithm in addition to the 2D partitioning we had implemented for
+Assignment 02.  We will be using timing results from both of these algorithms.
+
+In our descriptions, we always refer to the formula $$C = A \times B$$ where
+$A$, $B$, and $C$ are $n \times n$ matrices.  Some of the matrix multiplication
+algorithms distribute the left and right matrices in a different manner and we
+will make the distinction between $A$ and $B$, even though for our problem of
+computing $A^k$ they contain identical values.  Our determinant is computed by
+running the parallel formulation of the LU decomposition algorithm on the final
+matrix, $A^k$.
+
+Although we considered the possibility of using the square-and-multiply algorithm to compute powers of $X$, we decided against it. The objective of this assignment is to evaluate algorithms for matrix multiplication, and it is more convenient to have the parameter $k$ correspond directly to the number of full matrix multiplications ($k-1$).
+
+
+\subsection{Cannon's Algorithm}
+
+Cannon's algorithm is based on a checkerboard decomposition of the output data: the processors are arranged in a 2D mesh, and each is tasked with computing an $(n/\sqrt{p} \times n/\sqrt{p})$ block of the output matrix C.
+To do so, each processor needs to access the corresponding row of blocks of matrix A and the corresponding column of blocks of matrix B:
+
+$$C_{i,j} = \sum\limits_{k=1}^{\sqrt{p}} A_{i,k} \cdot B_{k,j}$$
+
+A naive solution would be to have each processor store the entire row and column it needs, but that would be memory-inefficient. Instead, Cannon's algorithm distributes an $(n/\sqrt{p} \times n/\sqrt{p})$ block of A and one of B to the processor owning the block of C with the same coordinates, and relies on an intelligent schedule of communications and computations to ensure each processor gets the data it needs with no waste of memory and no dead times.
+
+First, note that, by successively performing ring-1-shifts of the blocks of the A matrix on the row rings, and ring-1-shifts of the blocks of the  B matrix on the column rings, each processor gets to access all the blocks it needs. The problem is to ensure that the blocks are lined up so that the processor simultaneously holds the blocks of A and B that must be multiplied together.
+
+As it turns out, this condition can be ensured for all processors at the same time by performing an initial skewing of the A and B matrices (Figure \ref{fig:cannon-skew}). Each row of A is shifted left by $i-1$ steps (where $i$ is the row number), and each column of B is shifted up by $j-1$ steps (where $j$ is the column number). At this point, each processor holds two blocks of A and B that must be multiplied together to form one term of the sum that produces $C_{i,j}$.
+
+Then all rows of A are shifted left by one step, and all columns of B are shifted up by one step; again, each processor ends up with a pair of elements that must be multiplied together and added to the computation of its $C_{i,j}$. These shift and multiply operations are repeated $\sqrt{p}$ times, until each processor has finished computing its block of C. Then the product matrix can be gathered.
+
+
+\begin{figure}
+	\centering
+	\includegraphics[width=1.0\textwidth]{images/cannon-skew.pdf}
+    \caption{Explanation of the skew operation in Cannon's algorithm.}
+    \label{fig:cannon-skew}
+\end{figure}
+
+\subsubsection{Local memory usage}
+
+Each processor holds a block of the operand matrices A and B and of the result
+matrix C. Therefore, $$M_p = O(n^2/p)$$
+
+However, the root node is an exception
+since it holds the initial matrix and gathers the final product matrix, so its
+local memory usage is $$M_p = O(n^2)$$
+
+\subsubsection{Parallel Computation Time (Local Computations)}
+
+In the analysis of matrix multiplication it is usually assumed that the cost of
+multiplication instructions dominates that of addition instructions; this
+assumption is reflected in the reality of current computer systems.
+
+For each invocation of the algorithm, each processor performs $\sqrt{p}$ naive
+matrix multiplications of submatrices of size $n/\sqrt{p}$. Naive matrix
+multiplication performs $O(n^3)$ multiplications, so the number of operations
+per processor is $O(\sqrt{p}(n/\sqrt{p})^3)$. Then the computation time is: 
+
+\begin{eqnarray*}
+T_{{comp}} 	&=& t_{{mult}} \cdot \sqrt{p} \cdot (n/\sqrt{p})^3 \\ 
+			&=& t_{{mult}} \cdot n^3 / p
+\end{eqnarray*}
+
+\subsubsection{Parallel Communication Time}
+
+The algorithm involves the following communication steps:
+\begin{itemize}
+	\item scatter the X matrix into blocks of size $O(n^2/p)$
+	\item skew matrix A (B); each processor performs a ring\_shift operation on
+	the row (column) ring with distance = row (column) number
+	\item $\sqrt{p}$ times: shift matrix A (B): ring\_shift with distance 1
+	\item gather the product matrix
+\end{itemize}
+
+The message size $m$ is always $n^2/p$. In general, we can assume that $t_s$ is
+dominated by $t_w \cdot m$.
+
+\begin{itemize}
+	\item Scatter on a mesh takes: $$T_{{scatter}} = t_s
+\log{p} + t_w \cdot m  \cdot (p-1) = t_s \log{p} + t_w \cdot (n^2/p) \cdot
+(p-1)$$
+Gather has the same complexity as scatter.
+
+\item Ring q-shift involves $\min(q, p-q)$ neighbor-to-neighbor communications:
+$$T_{{shift-q}} = \min(q,p-q) \cdot (t_s + t_w \cdot m)$$
+
+\item The highest value for the skew shift will be:
+$$T_{{skew}} = \sqrt{p}/2 \cdot (t_s + t_w \cdot n^2/p)$$
+
+\item For all of the $\sqrt{p}$ shifts collectively, we have
+$$T_{{shift}} = \sqrt{p} \cdot (t_s + t_w \cdot n^2/p)$$
+
+\end{itemize}
+
+Then the overall communication time is:
+
+\begin{eqnarray*}
+T_{{comm}} 	&=& T_{{scatter}} + T_{{skew}} + T_{{shift}} + T_{{gather}} \\
+			&=& 2 \cdot T_{{scatter}} + T_{{skew}} + T_{{shift}}  \\
+			&=& 2 \cdot t_s  \cdot \log{p} + 2 \cdot t_w \cdot \frac{n^2}{p}(p-1) + \frac{\sqrt{p}}{2} \cdot (t_s + t_w \cdot n^2/p) + \sqrt{p} \cdot (t_s + t_w \cdot \frac{n^2}{p}) \\ 
+			&=& 2 \cdot t_s \cdot \log{p} + 2 \cdot t_w  \cdot \frac{n^2}{p}(p-1) + \frac{3}{2}\sqrt{p}  \cdot \left(t_s + t_w \cdot \frac{n^2}{p}\right) \\ 
+			&=& t_s \cdot \left(2 \log{p} + \frac{3}{2}\sqrt{p}\right) + t_w \cdot \left(2 \frac{n^2}{p}(p-1) + \frac{n^2}{p}\right) \\ 
+			&=& t_s \cdot \left(2 \log{p} + \frac{3}{2}\sqrt{p}\right) + t_w \cdot \frac{n^2}{p}(2(p-1) + 1) \\
+			&=& t_s \cdot \left(2 \log{p} + \frac{3}{2}\sqrt{p}\right) + t_w \cdot \frac{n^2}{p}(2p-1) \\
+\end{eqnarray*}
+
+
+\subsubsection{Parallel Run Time}
+
+\begin{eqnarray*}
+T_p 	&=& T_{{comp}} + T_{{comm}} \\
+		&=& t_{{mult}} \cdot \frac{n^3}{p} + t_s \cdot \left(2 \log{p} + \frac{3}{2} \sqrt{p}\right) + t_w \cdot \frac{n^2}{p}(2p-1) \\
+%		&=& O(n^3/p + \log{p} + \sqrt{p} + n^2 (2p-1)/p) \\
+%		&=& O(n^3/p + \sqrt{p}) \\
+\end{eqnarray*}
+
+\subsubsection{Speedup}
+
+For the reference serial algorithm, we will use the naive multiplication algorithm here.
+
+\begin{eqnarray*}
+S &=& \frac{T_s}{T_p} \\
+&=& \frac{ t_{mult} \cdot n^3 }{ t_{mult} \cdot \frac{n^3}{p} + t_s \cdot \left(2 \log{p} + \frac{3}{2} \sqrt{p}\right) + t_w \cdot \frac{n^2}{p}(2p-1) } \\
+&=& \frac{ n^3 }{ \frac{n^3}{p} + \frac{t_w}{t_{mult}} \cdot \frac{n^2}{p}(2p-1) + \frac{t_s}{t_{mult}} \cdot \left(2 \log{p} + \frac{3}{2} \sqrt{p}\right) } \\
+&=& \frac{ p }{ 1 + \frac{t_w}{t_{mult}} \cdot \frac{2p-1}{n} + \frac{t_s}{t_{mult}} \cdot \frac{p\left(2 \log{p} + \frac{3}{2} \sqrt{p}\right)}{n^3} } \\
+\end{eqnarray*}
+
+%\begin{eqnarray*}
+%S &=& T_s / T_p \\
+%&=& \frac{n^3}{n^3 / p + \log{p} + \sqrt{p} + n^2 \cdot (2p-1)/p} \\
+%&=& \frac{pn^3}{ n^3 + n^2 (2p-1) + p\sqrt{p} + p\log{p} } \\
+%&=& \frac{p}{ 1 + \frac{2p-1}{n} + \frac{p(\sqrt{p} + \log{p})}{n^3} } \\
+%\end{eqnarray*}
+
+If $n$ grows much larger than $p$, the denominator approaches $1$, and so the system approaches linear speedup.
+
+\subsubsection{Efficiency}
+
+\begin{eqnarray*}
+E &=& \frac{T_s}{pT_p} = \frac{S}{ p} = \\
+&=& \frac{ 1 }{ 1 + \frac{t_w}{t_{mult}} \cdot \frac{2p-1}{n} + \frac{t_s}{t_{mult}} \cdot \frac{p\left(2 \log{p} + \frac{3}{2} \sqrt{p}\right)}{n^3} } \\
+\end{eqnarray*}
+
+If $n$ grows much larger than $p$, the system approaches ideal efficiency.
+
+\subsubsection{Cost-optimality}
+
+Cost-optimality is attained when efficiency remains constant as $n$ and $p$ change.
+First, let us note that the impact of the startup time of communication is negligible when the message size is large; since our message size is $n^2/p$, this condition is satisfied. Therefore we can simplify the expression of efficiency as follows:
+
+\begin{eqnarray*}
+E &=& \frac{ 1 }{ 1 + \frac{t_w}{t_{mult}} \cdot \frac{2p-1}{n} } \\
+\end{eqnarray*}
+
+The condition for cost-optimality is then
+
+\begin{eqnarray*}
+O(2p-1) = O(n) \\
+O(p) = O(n) \\
+p = \Theta(n)
+\end{eqnarray*}
+
+Since our workload $W$ is $n^3$, the isoefficiency function can be obtained as
+
+\begin{eqnarray*}
+n &=& \Theta (p) \\
+n^3 &=& \Theta (p^3) \\
+W &=& k \cdot p^3 \\
+\end{eqnarray*}
+
+
+\subsection{Cannon's algorithm with local multiplication using Strassen}
+
+This is a variant of the previous algorithm, where each processor computes the local products using Strassen's multiplication algorithm instead of the naive multiplication algorithm. This increases memory usage (although Cannon's decomposition remains memory-efficient), but reduces the computation time for large matrices.
+
+\subsubsection{Local memory usage}
+
+In addition to the normal memory usage for Cannon's algorithm, we must consider
+the temporary storage used for Strassen. Strassen's algorithm is run locally by
+each processor on a square block with size $n/\sqrt{p}$. Let us assume that
+$n/\sqrt{p}$ is a power of 2.
+
+Each invocation of Strassen on a matrix of size $s$ allocates storage for
+$9 \cdot (s/2)^2$ elements (the 7 M matrices and two temporary matrices for computing
+intermediate sums and products). Then it recursively invokes Strassen 7 times on
+blocks of size $s/2$. Therefore its memory usage is:
+
+\begin{eqnarray*}
+f(s) &=& 9/4\cdot s^2 + 7\cdot f(s/2)	\\
+&=& 9/4\cdot  s^2 + 7\cdot  9/4\cdot  (s/2)^2 + 7\cdot  7\cdot  f(s/4)	\\
+&=& 9/4\cdot  (s^2 + 7/4\cdot  s^2) + 7\cdot  7\cdot  f(s/4)	\\
+&=& 9/4\cdot  ( s^2 + 7/4\cdot  s^2 + (7/4)^2\cdot  s^2 ) +7^3\cdot  f(s/2^3) ... 	\\
+&=& s^2 \cdot   9/4 \cdot   (7/4 + (7/4)^2 + \dots)	\\
+&=& s^2 \cdot   9/4 \cdot   \sum\limits_{i=1}^{log_2 s} (7/4)^i 	\\
+&=& s^2 \cdot   9/4 \cdot   log_2\left(2^{\sum\limits_{i=1}^{log_2 s} (7/4)^i}\right) 	\\
+&=& s^2 \cdot   9/4 \cdot   log_2\left(\prod\limits_{i=1}^{log_2 s} 2^{(7/4)^i}\right) 	\\
+&=& s^2 \cdot   9/4 \cdot   log_2\left(\prod\limits_{i=1}^{log_2 s} (7/4)^{2^i}\right) 	\\
+&=& s^2 \cdot   9/4 \cdot   log_2(7/4) \cdot   log_{7/4}\left(\prod\limits_{i=1}^{log_2 s} (7/4)^{2^i}\right) 	\\
+&=& s^2 \cdot   9/4 \cdot   log_2(7/4) \cdot   \left(\sum\limits_{i=1}^{log_2 s} log_{7/4}(7/4)^{2^i}\right) 	\\
+&=& s^2 \cdot   9/4 \cdot   log_2(7/4) \cdot   \left(\sum\limits_{i=1}^{log_2 s} 2^i\right) 	\\
+&=& s^2 \cdot   9/4 \cdot   log_2(7/4) \cdot   (2^{log_2 s+1} - 1) 	\\
+&=& s^2 \cdot   9/4 \cdot   log_2(7/4) \cdot   (2 s - 1) 	\\
+&=& s^2 \cdot   (2  s - 1) \cdot   9/4 \cdot   log_2(7/4) 	\\
+&=& (2  s^3 - s^2) \cdot   9/4 \cdot   log_2(7/4)
+\end{eqnarray*}
+
+Hence
+$$f(s) = O(s^3)$$
+
+	
+$$f(n/\sqrt{p}) = O\left(\frac{n^3}{p^{3/2}}\right)$$
+
+Thus the space complexity becomes:
+$$Mp = O\left(\frac{n^3}{p^{3/2}} + \frac{n^2}{p}\right) = O\left(\frac{n^2}{p} \cdot \left(\frac{n}{\sqrt{p}}+1\right)\right) = O\left(\frac{n^3}{p^{3/2}}\right)$$
+
+For the root node, it becomes:
+
+$$Mp = O\left(\frac{n^3}{p^{3/2}} + n^2\right) = O\left(n^2 \cdot \left(\frac{n}{p^{3/2}} + 1\right)\right) = O\left(\frac{n^3}{p^{3/2}}\right)$$
+
+
+\subsubsection{Parallel computation time}
+
+For each invocation of the algorithm, each processor performs $\sqrt{p}$ Strassen
+matrix multiplications of submatrices of size $n/\sqrt{p}$. Strassen matrix
+multiplication performs $\approx n^{2.807}$ multiplications, so the number of
+operations per processor is $\sqrt{p} \cdot (n/\sqrt{p})^{2.807}$. Then the computation time is:
+
+\begin{eqnarray*}
+T_{{comp}} &=& t_{{mult}} \cdot \sqrt{p} \cdot (n/\sqrt{p})^{2.807} \\
+&=& t_{{mult}} \cdot n^{2.807} \cdot \sqrt{p} \cdot  p^{-2.807/2} \\
+&=& t_{{mult}} \cdot n^{2.807} \cdot  p^{(1-2.807)/2} \\
+&=& t_{{mult}} \cdot n^{2.807} \cdot  p^{-0.9035}
+\end{eqnarray*}
+
+\subsubsection{Parallel communication time}
+
+This is unchanged from the regular Cannon's algorithm:
+
+\begin{eqnarray*}
+T_{{comm}} 	&=& T_{{scatter}} + T_{{skew}} + T_{{shift}} + T_{{gather}} \\
+			&=& t_s \cdot \left(2 \log{p} + \frac{3}{2}\sqrt{p}\right) + t_w \cdot \frac{n^2}{p}(2p-1) \\
+\end{eqnarray*}
+
+\subsubsection{Parallel run-time}
+
+\begin{eqnarray*}
+T_p &=& T_{{comp}} + T_{{comm}} \\
+&=& t_{{mult}} \cdot n^{2.807} \cdot  p^{-0.9035} + t_s \cdot \left(2 \log{p} + \frac{3}{2}\sqrt{p}\right) + t_w \cdot \frac{n^2}{p}(2p-1)
+\end{eqnarray*}
+
+
+\subsubsection{Speedup}
+
+In this case, we will use Strassen as the reference serial algorithm.
+
+\begin{eqnarray*}
+S &=& \frac{T_s}{T_p} \\
+&=& \frac{ t_{{mult}} \cdot n^{2.807} }{  t_{{mult}} \cdot n^{2.807} \cdot  p^{-0.9035} + t_s \cdot \left(2 \log{p} + \frac{3}{2}\sqrt{p}\right) + t_w \cdot \frac{n^2}{p}(2p-1) } \\
+&=& \frac{ n^{2.807} }{  n^{2.807} \cdot  p^{-0.9035} + \frac{t_s}{t_{mult}} \cdot \left(2 \log{p} + \frac{3}{2}\sqrt{p}\right) + \frac{t_w}{t_{mult}} \cdot \frac{n^2}{p}(2p-1) } \\
+&=& \frac{ 1 }{  p^{-0.9035} + \frac{t_w}{t_{mult}} \cdot \frac{n^2}{p  n^{2.807}}(2p-1) + \frac{t_s}{t_{mult}} \cdot \frac{ \left(2 \log{p} + \frac{3}{2}\sqrt{p}\right) }{ n^{2.807} }  } \\
+&=& \frac{ p^{0.9035} }{  1 + \frac{t_w}{t_{mult}} \cdot \frac{p^{0.9035} n^2}{p  n^{2.807}}(2p-1) + \frac{t_s}{t_{mult}} \cdot \frac{ p^{0.9035} \left(2 \log{p} + \frac{3}{2}\sqrt{p}\right) }{ n^{2.807} }  } \\
+&=& \frac{ p^{0.9035} }{  1 + \frac{t_w}{t_{mult}} \cdot \frac{ 2p-1}{p^{0.0965}  n^{0.807}} + \frac{t_s}{t_{mult}} \cdot \frac{ p^{0.9035} \left(2 \log{p} + \frac{3}{2}\sqrt{p}\right) }{ n^{2.807} }  } \\
+\end{eqnarray*}
+
+It may be interesting to compare this with the expression we obtained for the speedup with the standard Cannon's algorithm:
+
+\begin{eqnarray*}
+S_{cannon}&=& \frac{ p }{ 1 + \frac{t_w}{t_{mult}} \cdot \frac{2p-1}{n} + \frac{t_s}{t_{mult}} \cdot \frac{p\left(2 \log{p} + \frac{3}{2} \sqrt{p}\right)}{n^3} } \\
+\end{eqnarray*}
+
+\subsubsection{Efficiency}
+
+\begin{eqnarray*}
+E &=& \frac{T_s}{pT_p} = \frac{S}{ p} = \\
+&=& \frac{ p^{-0.0965} }{  1 + \frac{t_w}{t_{mult}} \cdot \frac{ 2p-1}{p^{0.0965}  n^{0.807}} + \frac{t_s}{t_{mult}} \cdot \frac{ p^{0.9035} \left(2 \log{p} + \frac{3}{2}\sqrt{p}\right) }{ n^{2.807} }  } \\
+\end{eqnarray*}
+
+Again, noting that our message size is large, we can simplify the expression as
+
+\begin{eqnarray*}
+E &=& \frac{ p^{-0.0965} }{  1 + \frac{t_w}{t_{mult}} \cdot \frac{ 2p-1}{p^{0.0965}  n^{0.807}}   } \\
+&=& \frac{ 1 }{  p^{0.0965} + \frac{t_w}{t_{mult}} \cdot \frac{ 2p-1}{ n^{0.807}}   } \\
+\end{eqnarray*}
+
+\subsubsection{Cost-optimality}
+
+The condition for cost-optimality is
+
+\begin{eqnarray*}
+  p^{0.0965} + \frac{t_w}{t_{mult}} \cdot \frac{ 2p-1}{ n^{0.807}}    &=& O(1) \\
+  p^{0.0965} + \frac{ p}{ n^{0.807}}    &=& O(1) \\
+  \frac{ p}{ n^{0.807}}    &=& \Theta(p^{0.0965}) \\
+  \frac{ p}{ p^{0.0965}}    &=& \Theta(n^{0.807}) \\
+  p^{0.9035}    &=& \Theta(n^{0.807}) \\
+\end{eqnarray*}
+
+Since our workload $W$ is $n^3$, the isoefficiency function can be obtained as
+
+\begin{eqnarray*}
+n^{0.807} &=& \Theta (p^{0.9035}) \\
+n^3 &=& \Theta (p^{3 \cdot 0.9035 /  0.807}) \\
+W &=& k \cdot p^{3.3587} \\
+\end{eqnarray*}
+
+\subsection{Dekel, Nassimi, Sahni (DNS) Algorithm}
+
+The DNS algorithm is based on decomposing the intermediate data of the matrix
+multiplication algorithm and we chose it because we wanted to explore the effect
+of this data decomposition method on our running time. One of the main
+differences from Cannon's algorithm is that it uses a 3D mesh topology of $q \times q \times q$ processors, and
+requires the total number of processors to be a perfect cube (i.e., $p = q^3$). Each
+processor $P_{i,j,k}$ in the 3D mesh computes the multiplication of the
+$A_{i,k}$ and $B_{k,j}$ elements.  In order to make DNS algorithm cost efficient
+for $p < n$, each processor receives a submatrix of the A and B matrices, each
+of size $(n/q) \times (n/p)$, which it then multiplies using a serial matrix
+multiplication algorithm.
+
+The results are then reduced onto the $i-k$ plane and the final $C$ matrix is
+gathered at the root processor (rank = 0);
+
+\begin{figure}
+
+\begin{pseudocode}[ruled]{DNS\_Matrix\_Multiplication}{A, B}
+\CALL{Create\_3D\_Mesh}{} \vspace{10pt} \\
+
+Ablock \GETS \CALL{MPI\_Scatter\_on\_I-K}{A} \\
+Asub \GETS \CALL{MPI\_Broadcast\_on\_J}{Ablock} \vspace{10pt} \\
+
+Bblock \GETS \CALL{MPI\_Scatter\_on\_K-J}{B} \\
+Bsub \GETS \CALL{MPI\_Broadcast\_on\_I}{Bblock} \vspace{10pt} \\
+
+Csub \GETS \CALL{SerialMatrixMultiply}{Asub, Bsub} \vspace{10pt} \\
+
+Cred \GETS \CALL{MPI\_Reduce\_on\_K}{Csub} \\
+C \GETS \CALL{MPI\_Gather\_on\_I-J}{Cred} \vspace{10pt} \\
+
+\RETURN{C}
+\end{pseudocode}
+\caption{The DNS algorithm with the MPI calls used.}
+\end{figure}
+
+\vspace{10pt}
+
+\begin{figure}[h]
+	\centering
+	\includegraphics[width=0.8\textwidth]{images/dns.pdf}
+    \caption{An overview of the DNS algorithm.  The A, B and C matrix planes show the scatter/gather operations while the orthogonal arrows show the broadcast/reduce operations.}
+    \label{fig:all_results}
+\end{figure}
+
+\subsubsection{Local memory usage}
+
+Since a cost efficient formulation of the DNS algorithm uses $p < n$, each
+processor gets an $(n/q \times n/q)$ submatrix, where $q = \sqrt[3]{p}$, for
+each matrix $A$ and $B$.  It also stores the output matrix $C$.  Therefore the
+local storage requirements for the DNS algorithm is $$3 \cdot {\left(\frac{n}{\sqrt[3]{p}}\right)}^2 = O\left(\frac{n^2}{p^{2/3}}\right)$$ at each
+processor.
+
+\subsubsection{Parallel Computation Time (Local Computations)}
+
+Each processor has to serial multiply its submatrices, which are square matrices with dimension $ n/\sqrt[3]{p}$, therefore the
+overall time spent for local computations is 
+$$T_{{comp}} = \left(\frac{n}{\sqrt[3]{p}}\right)^3 = \frac{n^3}{p}$$
+
+\subsubsection{Parallel Communication Time}
+
+The parallel communication time comes from the following operations:
+\begin{itemize}
+  \item Two scatter operations for matrices A and B on a 2D mesh, with each mesh dimension having $q = \sqrt[3]{p}$ processors, 
+  and the message size $m = (n/q)^2 = n^2/p^{2/3}$.
+	\begin{eqnarray*}
+  			T_{{scatter},{mesh}} &=& 2 \left[ t_s \log{q} + t_w  m (q-1) \right] \\
+  								 &=& 2 \left[ t_s \log{\sqrt[3]{p}} + t_w \left( \frac{n}{\sqrt[3]{p}} \right)^2 (\sqrt[3]{p} - 1) \right] \\
+   								 &=& 2 \left[ \frac{1}{3} t_s  \log{p} + t_w  \frac{n^2}{\sqrt[3]{p}} - t_w \frac{n^2}{\sqrt[3]{p}^2}  \right]		 
+  	\end{eqnarray*}
+  \item Two one-to-all broadcast on a ring with $q = \sqrt[3]{p}$ processors and message size $m = (n/q)^2 = n^2/p^{2/3}$.
+  	\begin{eqnarray*}
+  		 T_{{broadcast},{ring}} &=& 2 (t_s + t_w\cdot m) \log{q} \\
+  		 						&=& \frac{2}{3} \left(t_s + t_w \frac{n^2}{p^{2/3}}\right) \log{p} \\
+  		 						&=& \frac{2}{3} \left( t_s \log{p} + t_w \log{p} \frac{n^2}{p^{2/3}} \right)
+  	\end{eqnarray*}
+  \item Reduce on a ring with $q = \sqrt[3]{p}$ processors.  This time is identical to the one-to-all broadcast.
+  \item Gather the final matrix, on a 2D mesh with each dimension having $q = \sqrt[3]{p}$ processors.  This time is identical 
+  to the time it takes to do one scatter operation, and can be easily derived from the scatter formula above.
+\end{itemize}
+
+Therefore our total communication time is:
+\begin{eqnarray*}
+T_{{comm}} &=& T_{{scatter},{gather}} + T_{{broadcast},{reduce}} \\
+		   &=& 3 \left( \frac{1}{3} t_s  \log{p} + t_w  \frac{n^2}{\sqrt[3]{p}} - t_w \frac{n^2}{\sqrt[3]{p}^2}  \right) +
+		     \frac{3}{3} \left( t_s \log{p} + t_w \log{p} \frac{n^2}{p^{2/3}} \right) \\
+		   &=& 2 t_s \log{p} + 3 t_w \left( \frac{n^2}{{p}^{1/3}} \right) + t_w \frac{n^2}{p^{2/3}} (\log{p} - 3)
+\end{eqnarray*}
+
+\subsubsection{Parallel Run Time}
+
+Using the formula $T_p = T_{{comp}} + T_{{comm}}$ we get that 
+\begin{eqnarray*}
+T_p &=& \frac{n^3}{p} + 2 t_s \log{p} + 3 t_w \left( \frac{n^2}{{p}^{1/3}} \right) + t_w \frac{n^2}{p^{2/3}} (\log{p} - 3)
+\end{eqnarray*}
+
+\subsubsection{Speedup}
+
+\begin{eqnarray*}
+S &=& \frac{T_s}{T_p} \\
+  &=& \frac{n^3}{\frac{n^3}{p} + 2 t_s \log{p} + 3 t_w \left( \frac{n^2}{{p}^{1/3}} \right) + t_w \frac{n^2}{p^{2/3}} (\log{p} - 3)} \\
+  &=& \frac{1}{ \frac{1}{p} + 2 t_s \frac{\log{p}}{n^3} + \frac{3 t_w}{p^{1/3} n} + \frac{t_w (\log{p} - 3)}{p^{2/3} n} } \\
+  &=& \frac{p}{   1 + 2 t_s \frac{ p \log{p} }{ n^3 } + 3 t_w \frac{p^{2/3}}{n} + t_w \frac{p^{1/3} (\log{p} - 3)}{n}      }
+\end{eqnarray*}
+
+It can be seen from the equation that as the matrix increases in size, the speedup tends to become linear.
+
+\subsubsection{Cost}
+
+\begin{eqnarray*}
+C &=& p T_p \\
+  &=& n^3 + 2 t_s p \log{p} + 3 t_w p^{2/3} n^2 + t_w p^{1/3} n^2 (\log{p} - 3)
+\end{eqnarray*}
+
+\subsubsection{Efficiency}
+
+\begin{eqnarray*}
+E &=& \frac{T_s}{p T_p} = \frac{S}{p} \\
+  &=& \frac{1}{   1 + 2 t_s \frac{ p \log{p} }{ n^3 } + 3 t_w \frac{p^{2/3}}{n} + t_w \frac{p^{1/3} (\log{p} - 3)}{n} } \\
+\end{eqnarray*}
+
+\subsubsection{Cost optimality and Isoefficiency function}
+
+In order for our algorithm to be cost optimal with regards to the serial formulation, the efficiency must remain constant as the
+number of processors and the size of the matrices being multiplied increase.  In our case the efficiency is:
+
+\begin{eqnarray*}
+E &=& \frac{1}{   1 + 2 t_s \frac{ p \log{p} }{ n^3 } + 3 t_w \frac{p^{2/3}}{n} + t_w \frac{p^{1/3} (\log{p} - 3)}{n} }
+\end{eqnarray*}
+
+and asymptotically the $p^{2/3}/n$ term dominates all the other terms in the denominator, and therefore, in order for the algorithm to be cost 
+optimal $$O(n) = O(p^{2/3})$$
+
+For our problem of matrix multiplication, $W = n^3$, so therefore the isoefficiency function becomes:
+$$W = O(p^2)$$
+
+\subsection{LU Decomposition using 2D partitioning}
+
+The naive algorithm for computing the determinant seems quite parallelizable, but its factorial time complexity is unattractive. Instead, we decided to perform LU factorization in order to compute the determinant quickly.
+
+From assignment 2, we already had an implementation of LU decomposition using 2D partitioning of the matrix. We improved on it by getting rid of all broadcast calls and replacing them with pipelined communications. This brought a significant performance improvement. However, due to the significant likelihood of zeros in the matrix, we have to perform at least partial pivoting, and this puts a hamper on pipelining, because it forces us to perform an all-reduce operation along a column to choose the pivot element for each iteration of the algorithm.
+
+% for diag from 1 to n:
+%	all_reduce pivot along column
+%	pipeline pivot to the right
+%	calculate ms on pivot column
+%	for each column to the right of pivot column:
+%		eliminate
+%		pipeline pivot row item downwards
+
+This means that, once a pivot has been chosen, the elimination phase proceeds in a pipelined fashion: each processor receives the pivot, computes (or receives) the m values for the cells on the pivot column, sends them to the processor to its right, receives the a value for each cell on the pivot row, forwards the value downwards and performs elimination: the elimination front proceeds diagonally down and to the right, and most computations are performed behind the front.
+However, before the computations for the next iteration can begin, a new pivot needs to be chosen for the next row, which forces all processors to wait until the elimination front has traversed all processors.
+
+Another drawback of this algorithm is that it requires that the number of processors be a perfect square, which makes it difficult to use with the DNS matrix multiplication algorithm, which requires a number of processors which is a cube. The minimum number of processors that satisfied both conditions (apart from the trivial $1$, of course) is $2^6 = 64$, but we cannot get access to so many processors on Argo.
+
+\subsection{LU Decomposition using 1D partitioning}
+
+To avoid the drawbacks with the 2D partitioned version of LU decomposition, we implemented a new formulation of the LU algorithm, using 1D partitioning over rows. The processors are arranged in a ring, and each processor holds $n/p$ rows of the matrix. To improve load balancing, the rows are not divided into blocks, but rather they are assigned to each processor in a cyclic way: processor $k$ gets the rows whose row number $i = k (mod p)$ (here both $i$ and $k$ are zero-based indices).
+
+% for r from 1 to n:
+%	if I have row r:
+%		choose pivot on row r
+%	pipeline the pivot and the pivot row downwards
+%	perform elimination on each row after r
+
+Since the pivot choice is performed by a single processor, there are no obstacles to pipelining: once the first pivot has been chosen and send down, the processor holding the next row (which is the next processor down on the ring) can immediately perform elimination, choose the pivot for the next row, and send it down. The third processor receives the second pivot row immediately after the first, and so on. The computation proceeds downwards like an unbroken wave, with computation overlapping communication.
+
+This new version of the algorithm proved much faster than the 2D one: after running a special test to compare the two, we used the 1D decomposition for all other tests.
+
+\section{Parameter Ranges}
+
+Each of the programs was tested with $n \times n$ matrix input sizes of $$n =
+\{ 16, 64, 256, 512, 1024, 2048, 4096 \}$$ with powers of $$k=\{ 2, 4, 8,
+16 \}$$ and with processors $p$ and cores $c$ ranging in $$(p,c) = \{ (1,4),
+(2,2), (4,1), (4,4), (8,2) \}$$
+
+Note that the DNS algorithm can only be run with a perfect cube number of processes, and
+on ARGO that limits us to 8 processes, as we did not want to make use of virtual processors.
+
+\section{Results}
+
+Tables \ref{tab:cannontotal}, \ref{tab:cannon -stotal}, \ref{tab:dnstotal} and
+\ref{tab:dns -stotal} show the total runtime for the Cannon, Cannon/Strassen,
+DNS and DNS/Strassen formulations under a variety of values of $p$ (processing
+node count), $c$ (core count per node), $n$ (matrix side) and $k$ (power).
+Tables \ref{tab:cannonmatrix multiplication}, \ref{tab:cannon -smatrix
+multiplication}, \ref{tab:dnsmatrix multiplication}, \ref{tab:dns -smatrix
+multiplication} show the timings for matrix multiplication alone, while
+\ref{tab:cannonLU}, \ref{tab:cannon -sLU}, \ref{tab:dnsLU}, \ref{tab:dns -sLU}
+show the timings for the LU decomposition and determinant calculation.
+
+All of the timings above use the 1D version of LU. We chose it after developing
+and evaluating two different formulations: the comparison between them is
+provided in tables \ref{tab:lucompare_total} and \ref{tab:lucompare_LU}.
+
+\clearpage
+\input{results.tex}
+\clearpage
+
+\section{Analysis and Lessons}
+
+We applied Cannon's parallelization to two different matrix multiplication
+algorithms: the naive one, which is $O(n^3)$, and Strassen's, which is
+$O(n^{2.807})$. The communication overhead is exactly the same, but Strassen's
+computation time is $t_{{mult}} \cdot n^{2.807} \cdot  p^{-0.9035}$, compared to
+$t_{mult} \cdot n^3 / p$: therefore, the version using Strassen's has a better
+runtime. However, its isoefficiency function is worse: $k \cdot p^{3.3587}$
+compared to $k \cdot p^3$.
+
+Comparing Cannon's algorithm with DNS, Cannon's has better local memory usage
+than DNS, however, we can see from the isoefficiency function that DNS is more scalable.  So we are
+trading off memory usage for problem scalability.
+
+The results show that Strassen's algorithm can be slightly slower for small
+matrices, but becomes advantageous for large matrices, as can be seen for matrix of size 4096 in Figure \ref{fig:cannon-dns-n}. We could obtain
+the best of both worlds by falling back to the naive algorithms when Strassen is
+called for small matrices; this also occurs at the deepest levels of recursion
+when running Strassen on a large matrix, so it may bring a small improvement in
+that case as well.
+
+It is difficult to compare Cannon and DNS from the result tables, since the
+former algorithm requires a number of processors that is a square number, while
+the latter requires a cube. The smallest number of processors that would satisfy
+both is $2^6 = 64$, but we do not have
+that many processors available on Argo. However, by interpolating the
+ measurements, DNS does not appear to be faster than Cannon's. This becomes
+ evident in the graph in Figure \ref{fig:cannon-dns-p}.
+
+Our version of LU decomposition from assignment 2 required a square grid, and
+thus was not directly compatible with DNS. We implemented a new version with 1D
+decomposition, which is we made much faster by implementing pipelining communication with \texttt{MPI\_SendRecv} instead of \texttt{MPI\_Bcast} operations.
+
+
+\begin{figure}[h]
+	\centering
+	\includegraphics[width=1.0\textwidth]{images/finished/cannon-dns-1024-2.pdf}
+    \caption{Runtimes of Cannon's and DNS algorithms with naive and Strassen's
+    serial matrix multiplication algorithms for $n = 1204$ and $k = 2$.}
+    \label{fig:cannon-dns-p}
+\end{figure}
+
+% 
+% \begin{figure}
+% 	\centering
+% 	\includegraphics[width=0.8\textwidth]{images/r-lub}
+%     \caption{Runtimes of LU without pivoting using MPI\_BCast.}
+%     \label{fig:lub_results}
+% \end{figure}
+% 
+% \begin{figure}
+% 	\centering
+% 	\includegraphics[width=0.8\textwidth]{images/r-lubp}
+%     \caption{Runtimes of LU with pivoting using MPI\_BCast.}
+%     \label{fig:lubp_results}
+% \end{figure}
+% 
+% \begin{figure}
+% 	\centering
+% 	\includegraphics[width=0.8\textwidth]{images/r-all}
+%     \caption{Comparison of all algorithm with $n=16$.}
+%     \label{fig:all_results}
+% \end{figure}
+
+\section{Lessons}
+
+We found that it can be very beneficial to modularize the tasks performed by a program, and to separate the parallel and serial aspects. For this assignment we had two different parallel decompositions of matrix multiplication (Cannon's and DNS), two different serial formulations (naive and Strasser's), and two different formulations of the LU decomposition task (1D and 2D), and we were able to mix and match them freely and determine which was the best combination. It turned out that creating a hybrid of two different approaches (Cannon's and Strasser's) can produce much better results than taking each separately.
+
+For LU factorization, we saw that the importance of communication and pipelining cannot be overestimated. In this part of the program, profiling was very important to determine where time was being spent; although we removed these calls from the final program for the sake of clarity, we performed a poor man's profiling by accumulating the time spent in several key spots (for instance, in each MPI call in LU-2D). This allowed us to gauge the true impact of our use of MPI broadcasting primitives, and led first to a much improved implementation of LU-2D using pipelining, and then to its replacement with a different formulation that could make even better use of pipelining.
+
+We also improved our scripts for running experiments and collecting data, allowing us to automate the generation of not only tables, but also of graphs. It is definitely work it to put in time to automate these tasks up front, as it allowed us easily to keep refining our results as new test batches were run.
+
+On the other hand, we realized that it is perhaps better not to get too carried away with the coding, and to begin working on the report earlier. Ideally, the two tasks should be pipelined, so that the report for a first formulation of the problem gets written while coding the second: this would improve system resilience by allowing us to present a complete product (albeit of smaller scope) in case our task runs into a processing time limit.
+
+\begin{figure}[h]
+	\centering
+	\includegraphics[width=1.0\textwidth]{images/finished/cannon-dns-over-n-k-2.pdf}
+    \caption{Runtimes of Cannon's algrithm with $(p,c) = (4,1)$ and DNS
+    algorithm with $(p,c) = (4,2)$ with naive and Strassen's serial matrix
+    multiplication algorithms over $n$ for $k = 2$.}
+    \label{fig:cannon-dns-n}
+\end{figure}
+
+\begin{figure}[h]
+	\centering
+	\includegraphics[width=1.0\textwidth]{images/finished/cannon-dns-over-k-n-1024.pdf}
+    \caption{Runtimes of Cannon's algrithm with $(p,c) = (4,1)$ and DNS
+    algorithm with $(p,c) = (4,2)$ with naive and Strassen's serial matrix
+    multiplication algorithms over $k$ for $n = 1024$.}
+    \label{fig:cannon-dns-k}
+\end{figure}
+
+\clearpage
+
+\appendix
+\includepdf[pages={-}]{code/pdf/cannon-c.pdf}
+\includepdf[pages=-]{code/pdf/cannon-h.pdf}
+\includepdf[pages=-]{code/pdf/dns-c.pdf}
+\includepdf[pages=-]{code/pdf/lu1d-c.pdf}
+\includepdf[pages=-]{code/pdf/lu2d-c.pdf}
+\includepdf[pages=-]{code/pdf/common-c.pdf}
+\includepdf[pages=-]{code/pdf/common-h.pdf}
+\includepdf[pages=-]{code/pdf/Makefile.pdf}
+
+\end{document}
