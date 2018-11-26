@@ -1,5 +1,3 @@
-# CMPSC-450 Concurrent Scientific Programming
-
 ## Project 1: Memory Read Benchmark
 
 ## Project 2: Code Optimization Testing
